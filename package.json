@@ -1,0 +1,16 @@
+{
+  "name": "grafana-live-image-panel",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "grafana-toolkit plugin:dev",
+    "build": "grafana-toolkit plugin:build"
+  },
+  "devDependencies": {
+    "@grafana/data": "latest",
+    "@grafana/toolkit": "latest",
+    "@grafana/runtime": "latest",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "typescript": "latest"
+  }
+}

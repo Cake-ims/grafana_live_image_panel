@@ -1,0 +1,16 @@
+{
+  "type": "panel",
+  "name": "Live Image Panel (WebSocket)",
+  "id": "yourorg-live-image-panel",
+  "info": {
+    "keywords": ["realtime", "image", "websocket"],
+    "description": "A Grafana panel that displays real-time images from a WebSocket binary stream.",
+    "author": { "name": "Cake" },
+    "version": "1.0.0"
+  },
+  "includes": [],
+  "dependencies": {
+    "grafanaVersion": "10.0.0",
+    "plugins": []
+  }
+}
