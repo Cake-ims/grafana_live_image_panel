@@ -22,6 +22,44 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [imageCount, setImageCount] = useState(0);
+  const [fpsMetrics, setFpsMetrics] = useState({ rxFps: 0, txFps: 0 });
+
+  // Refs for FPS calculation
+  const lastFpsUpdateRef = useRef<number>(Date.now());
+  const rxFrameCountRef = useRef<number>(0);
+  const txFrameCountRef = useRef<number>(0);
+  const animationFrameRef = useRef<number | null>(null);
+
+  // FPS Calculation loop
+  useEffect(() => {
+    const updateFps = () => {
+      const now = Date.now();
+      const elapsed = now - lastFpsUpdateRef.current;
+
+      // Update every ~1 second
+      if (elapsed >= 1000) {
+        const rxFps = Math.round((rxFrameCountRef.current * 1000) / elapsed);
+        const txFps = Math.round((txFrameCountRef.current * 1000) / elapsed);
+
+        setFpsMetrics({ rxFps, txFps });
+
+        // Reset counters
+        rxFrameCountRef.current = 0;
+        txFrameCountRef.current = 0;
+        lastFpsUpdateRef.current = now;
+      }
+
+      animationFrameRef.current = requestAnimationFrame(updateFps);
+    };
+
+    animationFrameRef.current = requestAnimationFrame(updateFps);
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, []);
 
   // Cleanup function to revoke object URLs and prevent memory leaks
   const cleanupImageUrl = useCallback(() => {
@@ -115,6 +153,9 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
           const dataSize = event.data.byteLength;
           DEBUG.log(`Received image data: ${formatBytes(dataSize)}`);
           
+          // Increment receive frame count
+          rxFrameCountRef.current += 1;
+          
           const mimeType = getImageMimeType(event.data);
           DEBUG.log(`Detected image format: ${mimeType}`);
           
@@ -127,7 +168,15 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
           currentImageUrlRef.current = url;
           
           if (imgRef.current) {
-            imgRef.current.src = url;
+            // Using requestAnimationFrame to ensure we're not overwhelming the browser's paint cycle
+            // and to get a more accurate "displayed" count
+            requestAnimationFrame(() => {
+              if (imgRef.current) {
+                imgRef.current.src = url;
+                txFrameCountRef.current += 1;
+              }
+            });
+            
             setImageCount(prev => {
               const newCount = prev + 1;
               DEBUG.log(`Image displayed (total: ${newCount})`);
@@ -252,6 +301,11 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={statusDotStyle} />
               <span style={{ fontWeight: 500 }}>{getStatusText(connectionStatus)}</span>
+              {connectionStatus === 'connected' && (
+                <span style={{ opacity: 0.8, fontSize: '11px', marginLeft: '4px' }}>
+                  RX: {fpsMetrics.rxFps} FPS | TX: {fpsMetrics.txFps} FPS
+                </span>
+              )}
               {imageCount > 0 && (
                 <span style={{ marginLeft: 'auto', opacity: 0.8 }}>Images: {imageCount}</span>
               )}
