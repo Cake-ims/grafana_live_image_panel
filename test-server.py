@@ -66,18 +66,45 @@ async def image_server(websocket, path, image_path=None, fps=10):
     delay = 1.0 / fps
     
     try:
-        # Load static image if provided
-        static_image = None
-        if image_path and Path(image_path).exists():
-            with open(image_path, 'rb') as f:
-                static_image = f.read()
-            print(f"Using static image: {image_path}")
+        # Load images based on configuration
+        images = []
+        mode = "dynamic"
+        
+        if image_path:
+            p = Path(image_path)
+            if p.is_dir():
+                # Load all images from directory
+                extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
+                for ext in extensions:
+                    images.extend(list(p.glob(ext)))
+                    images.extend(list(p.glob(ext.upper())))
+                images.sort()  # Sort to ensure consistent order
+                
+                if images:
+                    mode = "directory"
+                    print(f"Found {len(images)} images in {image_path}")
+                else:
+                    print(f"Warning: No images found in {image_path}, falling back to dynamic generation")
+            
+            elif p.exists():
+                # Single static image
+                with open(image_path, 'rb') as f:
+                    images = [f.read()]
+                mode = "static"
+                print(f"Using static image: {image_path}")
+            else:
+                print(f"Warning: Path {image_path} not found, falling back to dynamic generation")
         else:
             print("Generating dynamic test images")
         
         while True:
-            if static_image:
-                image_data = static_image
+            if mode == "static":
+                image_data = images[0]
+            elif mode == "directory":
+                # Cycle through images in directory
+                current_image_path = images[frame_num % len(images)]
+                with open(current_image_path, 'rb') as f:
+                    image_data = f.read()
             else:
                 image_data = await create_test_image(frame_num=frame_num)
             
@@ -113,8 +140,12 @@ async def main():
     print("\nConnect your Grafana panel to: ws://localhost:8765/")
     print("Press Ctrl+C to stop\n")
     
+    async def handler(websocket):
+        # In newer websockets versions, path is available as websocket.path
+        await image_server(websocket, getattr(websocket, 'path', '/'), args.image, args.fps)
+    
     async with websockets.serve(
-        lambda ws, path: image_server(ws, path, args.image, args.fps),
+        handler,
         args.host,
         args.port
     ):
