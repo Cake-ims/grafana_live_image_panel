@@ -24,6 +24,12 @@ except ImportError:
     print("Error: PIL (Pillow) is required. Install with: pip install pillow")
     sys.exit(1)
 
+try:
+    import lz4.frame
+except ImportError:
+    print("Warning: lz4 module not found. LZ4 compression will not be available.")
+    print("Install with: pip install lz4")
+
 
 def create_bmp_header(width, height):
     """
@@ -129,6 +135,24 @@ async def create_test_image(width=640, height=480, frame_num=0, output_format='J
         img.save(img_bytes, format='BMP')
         return img_bytes.getvalue()
         
+    elif output_format == 'LZ4_RAW':
+        # Generate Raw RGB/BGR data and compress with LZ4
+        # This simulates 4K 60fps optimized streaming
+        
+        # Convert to BGR (standard for bitmaps) or RGB. 
+        # Since we reconstruct a BMP header in client which expects BGR usually for 24-bit, let's do BGR.
+        r, g, b = img.split()
+        img_bgr = Image.merge("RGB", (b, g, r))
+        
+        # Get raw bytes
+        raw_bytes = img_bgr.tobytes()
+        
+        # Compress with LZ4
+        if 'lz4.frame' in sys.modules:
+            return lz4.frame.compress(raw_bytes)
+        else:
+            raise ImportError("LZ4 module not available")
+            
     else:
         # Convert to JPEG bytes
         img_bytes = io.BytesIO()
@@ -209,8 +233,8 @@ async def main():
     parser.add_argument('--host', type=str, default='localhost', help='WebSocket server host (default: localhost)')
     parser.add_argument('--image', type=str, help='Path to image file to send (JPEG/PNG)')
     parser.add_argument('--fps', type=float, default=10, help='Frames per second (default: 10)')
-    parser.add_argument('--format', type=str, default='JPEG', choices=['JPEG', 'PNG', 'BMP_RAW'], 
-                        help='Output format for dynamic images (default: JPEG). Use BMP_RAW for uncompressed.')
+    parser.add_argument('--format', type=str, default='JPEG', choices=['JPEG', 'PNG', 'BMP_RAW', 'LZ4_RAW'], 
+                        help='Output format for dynamic images (default: JPEG). Use BMP_RAW for uncompressed, LZ4_RAW for compressed raw.')
     
     args = parser.parse_args()
     

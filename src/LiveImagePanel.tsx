@@ -1,28 +1,51 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { PanelProps } from '@grafana/data';
-import { DEBUG, validateWebSocketUrl, formatBytes, getWebSocketState } from './utils/debug';
+import { DEBUG, validateWebSocketUrl } from './utils/debug';
 import UTIF from 'utif';
+import lz4 from 'lz4js';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface LiveImagePanelOptions {
   wsUrl: string;
   reconnectDelay: number;
-  imageFormat: 'auto' | 'image/jpeg' | 'image/png' | 'image/webp' | 'image/tiff' | 'image/bmp';
+  imageFormat: 'auto' | 'image/jpeg' | 'image/png' | 'image/webp' | 'image/tiff' | 'image/bmp' | 'image/lz4';
   showStatusIndicator: boolean;
   objectFit: 'contain' | 'cover' | 'fill' | 'none' | 'scale-down';
 }
 
 interface Props extends PanelProps<LiveImagePanelOptions> {}
 
+// Helper to create BMP header for raw RGB data
+const createBmpHeader = (width: number, height: number): Uint8Array => {
+  const rowPadding = (4 - (width * 3) % 4) % 4;
+  const fileSize = 54 + (width * 3 + rowPadding) * height;
+  const header = new Uint8Array(54);
+  const view = new DataView(header.buffer);
+
+  // File Header
+  header[0] = 0x42; // B
+  header[1] = 0x4D; // M
+  view.setUint32(2, fileSize, true); // File size
+  view.setUint32(10, 54, true); // Offset
+
+  // Info Header
+  view.setUint32(14, 40, true); // Header size
+  view.setInt32(18, width, true); // Width
+  view.setInt32(22, -height, true); // Height (negative for top-down)
+  view.setUint16(26, 1, true); // Planes
+  view.setUint16(28, 24, true); // BPP
+  
+  return header;
+};
+
 export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
-  const imgRef = useRef<HTMLImageElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const currentImageUrlRef = useRef<string | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [imageCount, setImageCount] = useState(0);
+  // const [imageCount, setImageCount] = useState(0); // Not used in render for performance
   const [fpsMetrics, setFpsMetrics] = useState({ rxFps: 0, txFps: 0 });
 
   // Refs for FPS calculation
@@ -30,6 +53,26 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
   const rxFrameCountRef = useRef<number>(0);
   const txFrameCountRef = useRef<number>(0);
   const animationFrameRef = useRef<number | null>(null);
+
+  // Default dimensions for LZ4/Raw mode (should optimally be configurable or sent in initial handshake)
+  // For now assuming 4K or matching container, but raw stream usually implies fixed size known by client
+  // or we parse it from the first frame if we add a custom header. 
+  // IMPORTANT: For LZ4 raw stream, we need to know dimensions to reconstruct BMP header.
+  // We will assume 3840x2160 (4K) as requested, OR parse a custom header from server if implemented.
+  // For simplicity in this iteration: We'll infer from the buffer size assuming 4K, 
+  // or add a small metadata header in the protocol. 
+  // A better approach for "Raw" without metadata is to assume the server sends standard resolutions.
+  
+  // Update: We'll try to guess 4K, 1080p, etc based on size, or default to 640x480.
+  const guessDimensions = (byteLength: number): { w: number, h: number } | null => {
+    // 3 bytes per pixel
+    const pixels = byteLength / 3;
+    if (pixels === 3840 * 2160) { return { w: 3840, h: 2160 }; } // 4K
+    if (pixels === 1920 * 1080) { return { w: 1920, h: 1080 }; } // 1080p
+    if (pixels === 1280 * 720) { return { w: 1280, h: 720 }; }   // 720p
+    if (pixels === 640 * 480) { return { w: 640, h: 480 }; }     // VGA
+    return null;
+  };
 
   // FPS Calculation loop
   useEffect(() => {
@@ -62,12 +105,36 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
     };
   }, []);
 
-  // Cleanup function to revoke object URLs and prevent memory leaks
-  const cleanupImageUrl = useCallback(() => {
-    if (currentImageUrlRef.current) {
-      URL.revokeObjectURL(currentImageUrlRef.current);
-      currentImageUrlRef.current = null;
+  // Draw Bitmap to Canvas
+  const drawBitmap = useCallback((bitmap: ImageBitmap) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+        bitmap.close();
+        return;
     }
+
+    // Match canvas size to image size (or container size)
+    // For performance, better to keep canvas size fixed or responsive
+    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+    }
+
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true }); // Optimized context
+    if (ctx) {
+        ctx.drawImage(bitmap, 0, 0);
+        txFrameCountRef.current += 1;
+        
+        // setImageCount(prev => {
+        //     const newCount = prev + 1;
+        //     // Only log every 100 frames to reduce noise at 60fps
+        //     if (newCount % 100 === 0) {
+        //         DEBUG.log(`Image displayed (total: ${newCount})`);
+        //     }
+        //     return newCount;
+        // });
+    }
+    bitmap.close();
   }, []);
 
   // Determine image MIME type based on options
@@ -76,7 +143,6 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
       return options.imageFormat;
     }
 
-    // Try to detect format from magic bytes
     const bytes = new Uint8Array(data.slice(0, 4));
     
     // JPEG: FF D8 FF
@@ -98,12 +164,8 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
     }
     
     // TIFF: II (Intel) or MM (Motorola)
-    // II (0x49 0x49) followed by 42 (0x2A 0x00)
-    if (bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2A && bytes[3] === 0x00) {
-      return 'image/tiff';
-    }
-    // MM (0x4D 0x4D) followed by 42 (0x00 0x2A)
-    if (bytes[0] === 0x4D && bytes[1] === 0x4D && bytes[2] === 0x00 && bytes[3] === 0x2A) {
+    if ((bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2A && bytes[3] === 0x00) ||
+        (bytes[0] === 0x4D && bytes[1] === 0x4D && bytes[2] === 0x00 && bytes[3] === 0x2A)) {
       return 'image/tiff';
     }
     
@@ -111,8 +173,8 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
     return 'image/jpeg';
   }, [options.imageFormat]);
 
-  // Decode TIFF to PNG Blob using UTIF
-  const decodeTiffToPng = useCallback((data: ArrayBuffer): Promise<Blob> => {
+  // Decode TIFF to ImageBitmap (Optimized)
+  const decodeTiffToBitmap = useCallback((data: ArrayBuffer): Promise<ImageBitmap> => {
     return new Promise((resolve, reject) => {
       try {
         const ifds = UTIF.decode(data);
@@ -124,30 +186,9 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
         const page = ifds[0];
         UTIF.decodeImage(data, page);
         const rgba = UTIF.toRGBA8(page);
-
-        // Create canvas to draw the image
-        const canvas = document.createElement('canvas');
-        canvas.width = page.width;
-        canvas.height = page.height;
-        
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'));
-          return;
-        }
-
-        // Create ImageData from RGBA buffer
         const imageData = new ImageData(new Uint8ClampedArray(rgba), page.width, page.height);
-        ctx.putImageData(imageData, 0, 0);
-
-        // Convert to PNG Blob
-        canvas.toBlob((blob) => {
-          if (blob) {
-            resolve(blob);
-          } else {
-            reject(new Error('Canvas to Blob conversion failed'));
-          }
-        }, 'image/png');
+        
+        createImageBitmap(imageData).then(resolve).catch(reject);
       } catch (e) {
         reject(e);
       }
@@ -155,13 +196,10 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
   }, []);
 
   const connect = useCallback(() => {
-    // Clean up any existing connection
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
-
-    // Clear any pending reconnect
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -170,16 +208,13 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
     if (!options.wsUrl || options.wsUrl.trim() === '') {
       setConnectionStatus('error');
       setErrorMessage('WebSocket URL is required');
-      DEBUG.error("WebSocket URL is empty");
       return;
     }
 
-    // Validate URL format
     const validation = validateWebSocketUrl(options.wsUrl);
     if (!validation.valid) {
       setConnectionStatus('error');
       setErrorMessage(validation.error || 'Invalid WebSocket URL');
-      DEBUG.error("Invalid WebSocket URL:", validation.error);
       return;
     }
 
@@ -199,86 +234,72 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
 
       ws.onmessage = (event) => {
         try {
-          if (!(event.data instanceof ArrayBuffer)) {
-            DEBUG.warn("Received non-binary data");
-            return;
-          }
-
-          const dataSize = event.data.byteLength;
-          DEBUG.log(`Received image data: ${formatBytes(dataSize)}`);
-          
-          // Increment receive frame count
-          rxFrameCountRef.current += 1;
-          
-          let blobPromise: Promise<Blob>;
-
-          // Optimized path for Raw/BMP - bypass detection
-          if (options.imageFormat === 'image/bmp') {
-             blobPromise = Promise.resolve(new Blob([event.data], { type: 'image/bmp' }));
-          } else {
-             // Standard detection path
-             const mimeType = getImageMimeType(event.data);
-             DEBUG.log(`Detected image format: ${mimeType}`);
-             
-             if (mimeType === 'image/tiff') {
-                blobPromise = decodeTiffToPng(event.data);
-             } else {
-                blobPromise = Promise.resolve(new Blob([event.data], { type: mimeType }));
-             }
-          }
-          
-          blobPromise.then(blob => {
-            // Clean up previous image URL to prevent memory leaks
-            cleanupImageUrl();
-            
-            const url = URL.createObjectURL(blob);
-            currentImageUrlRef.current = url;
-            
-            if (imgRef.current) {
-              // Using requestAnimationFrame to ensure we're not overwhelming the browser's paint cycle
-              // and to get a more accurate "displayed" count
-              requestAnimationFrame(() => {
-                if (imgRef.current) {
-                  imgRef.current.src = url;
-                  txFrameCountRef.current += 1;
-                }
-              });
-              
-              setImageCount(prev => {
-                const newCount = prev + 1;
-                DEBUG.log(`Image displayed (total: ${newCount})`);
-                return newCount;
-              });
+            if (!(event.data instanceof ArrayBuffer)) {
+                return;
             }
-          }).catch(error => {
-            DEBUG.error("Error processing image blob:", error);
-            setErrorMessage(`Decoding error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-          });
+            const data = event.data;
+            // const dataSize = data.byteLength;
+            rxFrameCountRef.current += 1;
+
+            // Handle LZ4 Decompression
+            if (options.imageFormat === 'image/lz4') {
+                try {
+                    // Decompress
+                    // lz4js expects Uint8Array
+                    const decompressed = lz4.decompress(new Uint8Array(data));
+                    
+                    // Reconstruct BMP
+                    const dims = guessDimensions(decompressed.byteLength);
+                    if (!dims) {
+                         throw new Error(`Unknown raw image dimensions: ${decompressed.byteLength} bytes`);
+                    }
+                    
+                    // Combine Header + Decompressed Data
+                    const header = createBmpHeader(dims.w, dims.h);
+                    const bmpData = new Uint8Array(header.byteLength + decompressed.byteLength);
+                    bmpData.set(header);
+                    bmpData.set(decompressed, header.byteLength);
+                    
+                    const blob = new Blob([bmpData], { type: 'image/bmp' });
+                    createImageBitmap(blob).then(drawBitmap).catch(e => DEBUG.error("Bitmap creation failed", e));
+                    
+                } catch (e) {
+                    DEBUG.error("LZ4 Decompression error", e);
+                }
+                return;
+            }
+
+            // Handle Raw BMP (Uncompressed) - Optimized
+            if (options.imageFormat === 'image/bmp') {
+                const blob = new Blob([data], { type: 'image/bmp' });
+                createImageBitmap(blob).then(drawBitmap).catch(e => DEBUG.error("Bitmap creation failed", e));
+                return;
+            }
+
+            // Handle Standard Formats (JPEG, PNG, WebP, TIFF)
+            const mimeType = getImageMimeType(data);
+            
+            if (mimeType === 'image/tiff') {
+                decodeTiffToBitmap(data).then(drawBitmap).catch(e => DEBUG.error("TIFF decode failed", e));
+            } else {
+                // Optimized path for JPEG/PNG using createImageBitmap directly from Blob
+                const blob = new Blob([data], { type: mimeType });
+                createImageBitmap(blob).then(drawBitmap).catch(e => DEBUG.error("Bitmap creation failed", e));
+            }
 
         } catch (error) {
           DEBUG.error("Error processing image:", error);
-          setErrorMessage(`Error processing image: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
       };
 
       ws.onclose = (event) => {
-        DEBUG.log(`Disconnected - Code: ${event.code}, Reason: ${event.reason || 'none'}`);
         setConnectionStatus('disconnected');
-        
-        // Only auto-reconnect if it wasn't a manual close (code 1000)
         if (event.code !== 1000) {
-          DEBUG.log(`Retrying in ${options.reconnectDelay}ms...`);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect();
-          }, options.reconnectDelay);
-        } else {
-          DEBUG.log("Manual close, not reconnecting");
+          reconnectTimeoutRef.current = setTimeout(connect, options.reconnectDelay);
         }
       };
 
       ws.onerror = (error) => {
-        DEBUG.error("WebSocket error:", error);
-        DEBUG.error(`WebSocket state: ${getWebSocketState(ws)}`);
         setConnectionStatus('error');
         setErrorMessage(`Connection error: ${options.wsUrl}`);
         ws.close();
@@ -286,156 +307,88 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
 
       wsRef.current = ws;
     } catch (error) {
-      DEBUG.error("Failed to create WebSocket:", error);
       setConnectionStatus('error');
       setErrorMessage(`Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  }, [options.wsUrl, options.reconnectDelay, options.imageFormat, getImageMimeType, cleanupImageUrl, decodeTiffToPng]);
+  }, [options.wsUrl, options.reconnectDelay, options.imageFormat, getImageMimeType, decodeTiffToBitmap, drawBitmap]);
 
   // Effect to handle connection lifecycle
   useEffect(() => {
     connect();
-    
     return () => {
-      // Cleanup on unmount or when dependencies change
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
       }
-      
       if (wsRef.current) {
         wsRef.current.close();
-        wsRef.current = null;
       }
-      
-      cleanupImageUrl();
     };
-  }, [connect, cleanupImageUrl]);
+  }, [connect]);
 
   // Get status indicator color
   const getStatusColor = (status: ConnectionStatus): string => {
     switch (status) {
-      case 'connected':
-        return '#73bf69'; // Green
-      case 'connecting':
-        return '#f2cc0c'; // Yellow
-      case 'error':
-        return '#d44a3a'; // Red
-      default:
-        return '#808080'; // Gray
+      case 'connected': return '#73bf69';
+      case 'connecting': return '#f2cc0c';
+      case 'error': return '#d44a3a';
+      default: return '#808080';
     }
   };
 
   // Get status text
   const getStatusText = (status: ConnectionStatus): string => {
     switch (status) {
-      case 'connected':
-        return 'Connected';
-      case 'connecting':
-        return 'Connecting...';
-      case 'error':
-        return 'Error';
-      default:
-        return 'Disconnected';
+      case 'connected': return 'Connected';
+      case 'connecting': return 'Connecting...';
+      case 'error': return 'Error';
+      default: return 'Disconnected';
     }
   };
 
-  // Status dot animation style
-  const statusDotStyle: React.CSSProperties = {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    display: 'inline-block',
-    backgroundColor: getStatusColor(connectionStatus),
-    animation: 'pulse 2s infinite',
-  };
-
   return (
-    <>
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-      `}</style>
-      <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
+        {/* Status Bar */}
         {options.showStatusIndicator && (
           <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            padding: '8px',
-            background: 'rgba(0, 0, 0, 0.7)',
-            color: 'white',
-            fontSize: '12px',
-            zIndex: 10,
-            gap: '4px',
+            display: 'flex', flexDirection: 'column', padding: '8px',
+            background: 'rgba(0, 0, 0, 0.7)', color: 'white', fontSize: '12px', zIndex: 10, gap: '4px',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={statusDotStyle} />
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%', display: 'inline-block',
+                backgroundColor: getStatusColor(connectionStatus)
+              }} />
               <span style={{ fontWeight: 500 }}>{getStatusText(connectionStatus)}</span>
               {connectionStatus === 'connected' && (
                 <span style={{ opacity: 0.8, fontSize: '11px', marginLeft: '4px' }}>
                   RX: {fpsMetrics.rxFps} FPS | TX: {fpsMetrics.txFps} FPS
                 </span>
               )}
-              {imageCount > 0 && (
-                <span style={{ marginLeft: 'auto', opacity: 0.8 }}>Images: {imageCount}</span>
-              )}
             </div>
             {errorMessage && (
-              <div
-                style={{
-                  color: '#ff6b6b',
-                  fontSize: '11px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-                title={errorMessage}
-              >
+              <div style={{ color: '#ff6b6b', fontSize: '11px' }} title={errorMessage}>
                 ⚠ {errorMessage}
               </div>
             )}
           </div>
         )}
+
+        {/* Canvas for Rendering */}
         <div style={{
-          flex: 1,
-          width: '100%',
-          height: '100%',
-          overflow: 'hidden',
-          background: '#000',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          position: 'relative',
+          flex: 1, width: '100%', height: '100%', overflow: 'hidden', background: '#000',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative',
         }}>
-          <img
-            ref={imgRef}
+          <canvas
+            ref={canvasRef}
             style={{
-              width: '100%',
-              height: '100%',
-              objectFit: options.objectFit,
-              background: '#000',
-            }}
-            alt="Live stream"
-            onError={() => {
-              DEBUG.error("Image load error");
-              setErrorMessage('Failed to load image');
-              setConnectionStatus('error');
+              maxWidth: '100%', maxHeight: '100%', objectFit: options.objectFit,
+              display: connectionStatus === 'connected' ? 'block' : 'none'
             }}
           />
-          {!imgRef.current?.src && connectionStatus === 'connected' && (
-            <div style={{
-              position: 'absolute',
-              color: '#888',
-              fontSize: '14px',
-              textAlign: 'center',
-            }}>
-              Waiting for image data...
-            </div>
+          {connectionStatus !== 'connected' && (
+            <div style={{ color: '#888', fontSize: '14px', position: 'absolute' }}>Waiting for stream...</div>
           )}
         </div>
-      </div>
-    </>
+    </div>
   );
 };

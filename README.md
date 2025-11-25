@@ -137,6 +137,7 @@ This will start a Grafana instance with the plugin in development mode.
   - `PNG`: Force PNG format
   - `WebP`: Force WebP format
   - `Raw (BMP)`: Fastest performance. Bypasses detection and expects uncompressed BMP data.
+  - `Raw (LZ4)`: High performance compressed stream. Requires LZ4 compressed RGB/BGR data.
 - **Image Fit**: How the image should be resized:
   - `Contain`: Fit entire image within container
   - `Cover`: Fill container while maintaining aspect ratio
@@ -175,6 +176,14 @@ This will start a Grafana instance with the plugin in development mode.
    ```bash
    python3 test-server.py --format BMP_RAW --fps 30
    ```
+   
+   **Ultra-Low Latency 4K 60fps Mode (LZ4):**
+   Compressed stream for high resolutions:
+   ```bash
+   python3 test-server.py --format LZ4_RAW --fps 60
+   ```
+   *Note: Requires `lz4` module (`pip install lz4`)*
+
    *Note: Requires `websockets` and `pillow` installed (`pip install websockets pillow`)*
 
 2. **Configure the panel** with WebSocket URL: `ws://localhost:8765/`
