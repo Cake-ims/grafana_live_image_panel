@@ -75,10 +75,14 @@ async def image_server(websocket, path, image_path=None, fps=10):
             if p.is_dir():
                 # Load all images from directory
                 extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
+                unique_images = set()
                 for ext in extensions:
-                    images.extend(list(p.glob(ext)))
-                    images.extend(list(p.glob(ext.upper())))
-                images.sort()  # Sort to ensure consistent order
+                    # Windows filesystem is case-insensitive, but glob might be case-sensitive or not depending on implementation
+                    # We gather all matches and use a set to deduplicate
+                    unique_images.update(p.glob(ext))
+                    unique_images.update(p.glob(ext.upper()))
+                
+                images = sorted(list(unique_images))
                 
                 if images:
                     mode = "directory"
