@@ -7,10 +7,14 @@
   },
   "devDependencies": {
     "@grafana/data": "latest",
-    "@grafana/toolkit": "latest",
     "@grafana/runtime": "latest",
+    "@grafana/toolkit": "latest",
+    "@types/utif": "^3.0.6",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "utif": "^3.1.0"
   }
 }

@@ -34,6 +34,8 @@ export const plugin = new PanelPlugin<LiveImagePanelOptions>(LiveImagePanel).set
           { value: 'image/jpeg', label: 'JPEG' },
           { value: 'image/png', label: 'PNG' },
           { value: 'image/webp', label: 'WebP' },
+          { value: 'image/tiff', label: 'TIFF (via conversion)' },
+          { value: 'image/bmp', label: 'Raw (BMP)' },
         ],
       },
     })

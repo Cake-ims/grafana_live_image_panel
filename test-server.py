@@ -4,7 +4,7 @@ Simple WebSocket server for testing the Live Image Panel plugin.
 Sends a test image repeatedly over WebSocket.
 
 Usage:
-    python test-server.py [--port PORT] [--image PATH] [--fps FPS]
+    python test-server.py [--port PORT] [--image PATH] [--fps FPS] [--mode MODE]
 
 Requirements:
     pip install websockets pillow
@@ -14,6 +14,7 @@ import asyncio
 import websockets
 import argparse
 import sys
+import struct
 from pathlib import Path
 
 try:
@@ -24,7 +25,55 @@ except ImportError:
     sys.exit(1)
 
 
-async def create_test_image(width=640, height=480, frame_num=0):
+def create_bmp_header(width, height):
+    """
+    Create a standard 54-byte BMP header for a 24-bit RGB image.
+    """
+    # File Header (14 bytes)
+    # 0-1: 'BM'
+    # 2-5: File size (header + data)
+    # 6-9: Reserved (0)
+    # 10-13: Pixel data offset (54)
+    
+    # Info Header (40 bytes)
+    # 14-17: Header size (40)
+    # 18-21: Width
+    # 22-25: Height (negative for top-down)
+    # 26-27: Planes (1)
+    # 28-29: Bits per pixel (24)
+    # 30-33: Compression (0 = BI_RGB)
+    # 34-37: Image size (can be 0 for BI_RGB)
+    # 38-41: X pixels per meter
+    # 42-45: Y pixels per meter
+    # 46-49: Colors in palette (0)
+    # 50-53: Important colors (0)
+    
+    row_padding = (4 - (width * 3) % 4) % 4
+    file_size = 54 + (width * 3 + row_padding) * height
+    
+    header = bytearray(54)
+    
+    # Signature
+    header[0:2] = b'BM'
+    # File size
+    header[2:6] = struct.pack('<I', file_size)
+    # Offset
+    header[10:14] = struct.pack('<I', 54)
+    
+    # Info header size
+    header[14:18] = struct.pack('<I', 40)
+    # Width
+    header[18:22] = struct.pack('<i', width)
+    # Height (negative for top-down, typical for modern rendering)
+    header[22:26] = struct.pack('<i', -height)
+    # Planes
+    header[26:28] = struct.pack('<H', 1)
+    # Bits per pixel
+    header[28:30] = struct.pack('<H', 24)
+    
+    return header
+
+async def create_test_image(width=640, height=480, frame_num=0, output_format='JPEG'):
     """Create a simple test image with frame number"""
     img = Image.new('RGB', (width, height), color=(frame_num % 255, (frame_num * 2) % 255, (frame_num * 3) % 255))
     
@@ -44,20 +93,50 @@ async def create_test_image(width=640, height=480, frame_num=0):
     except:
         font = ImageFont.load_default()
     
-    text = f"Frame {frame_num}"
+    text = f"Frame {frame_num} ({output_format})"
     bbox = draw.textbbox((0, 0), text, font=font)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
     position = ((width - text_width) // 2, (height - text_height) // 2)
     draw.text(position, text, fill=(255, 255, 255), font=font)
     
-    # Convert to JPEG bytes
-    img_bytes = io.BytesIO()
-    img.save(img_bytes, format='JPEG', quality=85)
-    return img_bytes.getvalue()
+    if output_format == 'BMP_RAW':
+        # Generate raw BMP (Header + RGB bytes)
+        # Note: PIL's tobytes() returns raw RGB. BMP expects BGR usually, but let's see. 
+        # Actually BMP 24-bit is typically BGR. PIL 'raw' encoder can do 'BGR'.
+        
+        # We handle header manually for maximum control/simulation, or just use PIL's BMP save.
+        # But to simulate "raw pixel streaming", we'll do manual header + raw bytes to avoid PIL compression overhead if any.
+        
+        # Get raw BGR data (fastest for BMP)
+        # padding: each row must be multiple of 4 bytes
+        
+        # Using PIL's save('BMP') is effectively uncompressed RLE usually disabled for 24bit.
+        # But the user asked to "convert the image to a raw format to binary value for each pixel"
+        # So let's construct it manually to prove "no calculation" on client side logic.
+        
+        header = create_bmp_header(width, height)
+        # Convert to BGR for BMP standard
+        r, g, b = img.split()
+        img_bgr = Image.merge("RGB", (b, g, r))
+        
+        # BMP rows are padded to 4 bytes. 
+        # For simplicity in this demo, if width*3 is not div by 4, this manual concatenation might need padding logic.
+        # PIL's tobytes() doesn't add BMP padding by default.
+        
+        # Easiest correct way: Use PIL to save as BMP to memory
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format='BMP')
+        return img_bytes.getvalue()
+        
+    else:
+        # Convert to JPEG bytes
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format=output_format, quality=85)
+        return img_bytes.getvalue()
 
 
-async def image_server(websocket, path, image_path=None, fps=10):
+async def image_server(websocket, path, image_path=None, fps=10, output_format='JPEG'):
     """Handle WebSocket connection and send images"""
     client_addr = websocket.remote_address
     print(f"Client connected from {client_addr}")
@@ -77,8 +156,6 @@ async def image_server(websocket, path, image_path=None, fps=10):
                 extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.tif', '*.tiff']
                 unique_images = set()
                 for ext in extensions:
-                    # Windows filesystem is case-insensitive, but glob might be case-sensitive or not depending on implementation
-                    # We gather all matches and use a set to deduplicate
                     unique_images.update(p.glob(ext))
                     unique_images.update(p.glob(ext.upper()))
                 
@@ -99,7 +176,7 @@ async def image_server(websocket, path, image_path=None, fps=10):
             else:
                 print(f"Warning: Path {image_path} not found, falling back to dynamic generation")
         else:
-            print("Generating dynamic test images")
+            print(f"Generating dynamic test images ({output_format})")
         
         while True:
             if mode == "static":
@@ -110,7 +187,7 @@ async def image_server(websocket, path, image_path=None, fps=10):
                 with open(current_image_path, 'rb') as f:
                     image_data = f.read()
             else:
-                image_data = await create_test_image(frame_num=frame_num)
+                image_data = await create_test_image(frame_num=frame_num, output_format=output_format)
             
             await websocket.send(image_data)
             frame_num += 1
@@ -132,11 +209,14 @@ async def main():
     parser.add_argument('--host', type=str, default='localhost', help='WebSocket server host (default: localhost)')
     parser.add_argument('--image', type=str, help='Path to image file to send (JPEG/PNG)')
     parser.add_argument('--fps', type=float, default=10, help='Frames per second (default: 10)')
+    parser.add_argument('--format', type=str, default='JPEG', choices=['JPEG', 'PNG', 'BMP_RAW'], 
+                        help='Output format for dynamic images (default: JPEG). Use BMP_RAW for uncompressed.')
     
     args = parser.parse_args()
     
     print(f"Starting WebSocket image server on ws://{args.host}:{args.port}")
     print(f"FPS: {args.fps}")
+    print(f"Format: {args.format}")
     if args.image:
         print(f"Image: {args.image}")
     else:
@@ -146,7 +226,7 @@ async def main():
     
     async def handler(websocket):
         # In newer websockets versions, path is available as websocket.path
-        await image_server(websocket, getattr(websocket, 'path', '/'), args.image, args.fps)
+        await image_server(websocket, getattr(websocket, 'path', '/'), args.image, args.fps, args.format)
     
     async with websockets.serve(
         handler,
@@ -161,4 +241,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\nServer stopped")
-

@@ -136,6 +136,7 @@ This will start a Grafana instance with the plugin in development mode.
   - `JPEG`: Force JPEG format
   - `PNG`: Force PNG format
   - `WebP`: Force WebP format
+  - `Raw (BMP)`: Fastest performance. Bypasses detection and expects uncompressed BMP data.
 - **Image Fit**: How the image should be resized:
   - `Contain`: Fit entire image within container
   - `Cover`: Fill container while maintaining aspect ratio
@@ -168,6 +169,13 @@ This will start a Grafana instance with the plugin in development mode.
    # or with custom options:
    python3 test-server.py --port 8765 --fps 10
    ```
+
+   **High-Performance Mode (Raw BMP):**
+   To test the fastest possible display rate (uncompressed data):
+   ```bash
+   python3 test-server.py --format BMP_RAW --fps 30
+   ```
+   *Note: Requires `websockets` and `pillow` installed (`pip install websockets pillow`)*
 
 2. **Configure the panel** with WebSocket URL: `ws://localhost:8765/`
 

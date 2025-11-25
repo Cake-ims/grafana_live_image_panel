@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { PanelProps } from '@grafana/data';
 import { DEBUG, validateWebSocketUrl, formatBytes, getWebSocketState } from './utils/debug';
+import UTIF from 'utif';
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 export interface LiveImagePanelOptions {
   wsUrl: string;
   reconnectDelay: number;
-  imageFormat: 'auto' | 'image/jpeg' | 'image/png' | 'image/webp';
+  imageFormat: 'auto' | 'image/jpeg' | 'image/png' | 'image/webp' | 'image/tiff' | 'image/bmp';
   showStatusIndicator: boolean;
   objectFit: 'contain' | 'cover' | 'fill' | 'none' | 'scale-down';
 }
@@ -96,9 +97,62 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
       }
     }
     
+    // TIFF: II (Intel) or MM (Motorola)
+    // II (0x49 0x49) followed by 42 (0x2A 0x00)
+    if (bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2A && bytes[3] === 0x00) {
+      return 'image/tiff';
+    }
+    // MM (0x4D 0x4D) followed by 42 (0x00 0x2A)
+    if (bytes[0] === 0x4D && bytes[1] === 0x4D && bytes[2] === 0x00 && bytes[3] === 0x2A) {
+      return 'image/tiff';
+    }
+    
     // Default to JPEG if detection fails
     return 'image/jpeg';
   }, [options.imageFormat]);
+
+  // Decode TIFF to PNG Blob using UTIF
+  const decodeTiffToPng = useCallback((data: ArrayBuffer): Promise<Blob> => {
+    return new Promise((resolve, reject) => {
+      try {
+        const ifds = UTIF.decode(data);
+        if (!ifds || ifds.length === 0) {
+          reject(new Error('Invalid TIFF data'));
+          return;
+        }
+
+        const page = ifds[0];
+        UTIF.decodeImage(data, page);
+        const rgba = UTIF.toRGBA8(page);
+
+        // Create canvas to draw the image
+        const canvas = document.createElement('canvas');
+        canvas.width = page.width;
+        canvas.height = page.height;
+        
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Failed to get canvas context'));
+          return;
+        }
+
+        // Create ImageData from RGBA buffer
+        const imageData = new ImageData(new Uint8ClampedArray(rgba), page.width, page.height);
+        ctx.putImageData(imageData, 0, 0);
+
+        // Convert to PNG Blob
+        canvas.toBlob((blob) => {
+          if (blob) {
+            resolve(blob);
+          } else {
+            reject(new Error('Canvas to Blob conversion failed'));
+          }
+        }, 'image/png');
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }, []);
 
   const connect = useCallback(() => {
     // Clean up any existing connection
@@ -156,33 +210,51 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
           // Increment receive frame count
           rxFrameCountRef.current += 1;
           
-          const mimeType = getImageMimeType(event.data);
-          DEBUG.log(`Detected image format: ${mimeType}`);
-          
-          const blob = new Blob([event.data], { type: mimeType });
-          
-          // Clean up previous image URL to prevent memory leaks
-          cleanupImageUrl();
-          
-          const url = URL.createObjectURL(blob);
-          currentImageUrlRef.current = url;
-          
-          if (imgRef.current) {
-            // Using requestAnimationFrame to ensure we're not overwhelming the browser's paint cycle
-            // and to get a more accurate "displayed" count
-            requestAnimationFrame(() => {
-              if (imgRef.current) {
-                imgRef.current.src = url;
-                txFrameCountRef.current += 1;
-              }
-            });
-            
-            setImageCount(prev => {
-              const newCount = prev + 1;
-              DEBUG.log(`Image displayed (total: ${newCount})`);
-              return newCount;
-            });
+          let blobPromise: Promise<Blob>;
+
+          // Optimized path for Raw/BMP - bypass detection
+          if (options.imageFormat === 'image/bmp') {
+             blobPromise = Promise.resolve(new Blob([event.data], { type: 'image/bmp' }));
+          } else {
+             // Standard detection path
+             const mimeType = getImageMimeType(event.data);
+             DEBUG.log(`Detected image format: ${mimeType}`);
+             
+             if (mimeType === 'image/tiff') {
+                blobPromise = decodeTiffToPng(event.data);
+             } else {
+                blobPromise = Promise.resolve(new Blob([event.data], { type: mimeType }));
+             }
           }
+          
+          blobPromise.then(blob => {
+            // Clean up previous image URL to prevent memory leaks
+            cleanupImageUrl();
+            
+            const url = URL.createObjectURL(blob);
+            currentImageUrlRef.current = url;
+            
+            if (imgRef.current) {
+              // Using requestAnimationFrame to ensure we're not overwhelming the browser's paint cycle
+              // and to get a more accurate "displayed" count
+              requestAnimationFrame(() => {
+                if (imgRef.current) {
+                  imgRef.current.src = url;
+                  txFrameCountRef.current += 1;
+                }
+              });
+              
+              setImageCount(prev => {
+                const newCount = prev + 1;
+                DEBUG.log(`Image displayed (total: ${newCount})`);
+                return newCount;
+              });
+            }
+          }).catch(error => {
+            DEBUG.error("Error processing image blob:", error);
+            setErrorMessage(`Decoding error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          });
+
         } catch (error) {
           DEBUG.error("Error processing image:", error);
           setErrorMessage(`Error processing image: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -218,7 +290,7 @@ export const LiveImagePanel: React.FC<Props> = ({ options, width, height }) => {
       setConnectionStatus('error');
       setErrorMessage(`Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  }, [options.wsUrl, options.reconnectDelay, getImageMimeType, cleanupImageUrl]);
+  }, [options.wsUrl, options.reconnectDelay, options.imageFormat, getImageMimeType, cleanupImageUrl, decodeTiffToPng]);
 
   // Effect to handle connection lifecycle
   useEffect(() => {
