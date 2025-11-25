@@ -74,7 +74,7 @@ async def image_server(websocket, path, image_path=None, fps=10):
             p = Path(image_path)
             if p.is_dir():
                 # Load all images from directory
-                extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
+                extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.tif', '*.tiff']
                 unique_images = set()
                 for ext in extensions:
                     # Windows filesystem is case-insensitive, but glob might be case-sensitive or not depending on implementation
