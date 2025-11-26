@@ -81,32 +81,63 @@ def create_bmp_header(width, height):
 
 async def create_test_image(width=640, height=480, frame_num=0, output_format='JPEG'):
     """Create a simple test image with frame number"""
-    img = Image.new('RGB', (width, height), color=(frame_num % 255, (frame_num * 2) % 255, (frame_num * 3) % 255))
+    # For RAW_8BIT format, create 8-bit grayscale image
+    if output_format == 'RAW_8BIT':
+        width, height = 250, 250  # Fixed size for 8-bit raw images
+        img = Image.new('L', (width, height), color=frame_num % 256)  # 'L' mode = 8-bit grayscale
+    else:
+        img = Image.new('RGB', (width, height), color=(frame_num % 255, (frame_num * 2) % 255, (frame_num * 3) % 255))
     
     # Add some text/pattern to make it interesting
     from PIL import ImageDraw, ImageFont
     draw = ImageDraw.Draw(img)
     
-    # Draw a simple pattern
-    for i in range(0, width, 50):
-        draw.line([(i, 0), (i, height)], fill=(255, 255, 255), width=2)
-    for i in range(0, height, 50):
-        draw.line([(0, i), (width, i)], fill=(255, 255, 255), width=2)
+    if output_format == 'RAW_8BIT':
+        # For 8-bit grayscale, use grayscale values
+        # Draw a simple pattern
+        for i in range(0, width, 25):
+            draw.line([(i, 0), (i, height)], fill=255, width=1)
+        for i in range(0, height, 25):
+            draw.line([(0, i), (width, i)], fill=255, width=1)
+        
+        # Add frame number text
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 30)
+        except:
+            font = ImageFont.load_default()
+        
+        text = f"Frame {frame_num}"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        position = ((width - text_width) // 2, (height - text_height) // 2)
+        draw.text(position, text, fill=255, font=font)
+    else:
+        # Draw a simple pattern for RGB images
+        for i in range(0, width, 50):
+            draw.line([(i, 0), (i, height)], fill=(255, 255, 255), width=2)
+        for i in range(0, height, 50):
+            draw.line([(0, i), (width, i)], fill=(255, 255, 255), width=2)
+        
+        # Add frame number text
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+        except:
+            font = ImageFont.load_default()
+        
+        text = f"Frame {frame_num} ({output_format})"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        position = ((width - text_width) // 2, (height - text_height) // 2)
+        draw.text(position, text, fill=(255, 255, 255), font=font)
     
-    # Add frame number text
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-    except:
-        font = ImageFont.load_default()
+    if output_format == 'RAW_8BIT':
+        # Return raw 8-bit grayscale pixel data (no header, no encoding)
+        # Just the raw bytes: width * height bytes, each byte is a pixel value (0-255)
+        return img.tobytes()
     
-    text = f"Frame {frame_num} ({output_format})"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    position = ((width - text_width) // 2, (height - text_height) // 2)
-    draw.text(position, text, fill=(255, 255, 255), font=font)
-    
-    if output_format == 'BMP_RAW':
+    elif output_format == 'BMP_RAW':
         # Generate raw BMP (Header + RGB bytes)
         # Note: PIL's tobytes() returns raw RGB. BMP expects BGR usually, but let's see. 
         # Actually BMP 24-bit is typically BGR. PIL 'raw' encoder can do 'BGR'.
@@ -160,71 +191,132 @@ async def create_test_image(width=640, height=480, frame_num=0, output_format='J
         return img_bytes.getvalue()
 
 
-async def image_server(websocket, path, image_path=None, fps=10, output_format='JPEG'):
+def load_images(image_path):
+    """Load images from path into memory. Returns (images_list, mode)"""
+    images = []
+    mode = "dynamic"
+    
+    if not image_path:
+        return images, mode
+    
+    p = Path(image_path)
+    if p.is_dir():
+        # Load all images from directory
+        extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.tif', '*.tiff', '*.bmp']
+        unique_images = set()
+        for ext in extensions:
+            unique_images.update(p.glob(ext))
+            unique_images.update(p.glob(ext.upper()))
+        
+        image_paths = sorted(list(unique_images))
+        
+        if image_paths:
+            mode = "directory"
+            print(f"Found {len(image_paths)} images in {image_path}")
+            
+            # Pre-load all images into memory to avoid disk I/O bottleneck
+            print("Loading images into memory...")
+            total_size = 0
+            for i, img_path in enumerate(image_paths):
+                try:
+                    with open(img_path, 'rb') as f:
+                        image_data = f.read()
+                    images.append(image_data)
+                    total_size += len(image_data)
+                    
+                    # Log first few image sizes for debugging
+                    if i < 3:
+                        print(f"  Image {i+1}: {img_path.name} ({len(image_data):,} bytes)")
+                except Exception as e:
+                    print(f"  Warning: Failed to load {img_path.name}: {e}")
+                    continue
+            
+            if images:
+                total_mb = total_size / (1024 * 1024)
+                avg_mb = total_mb / len(images)
+                print(f"Loaded {len(images)} images into memory ({total_mb:.2f} MB total, {avg_mb:.2f} MB avg per image)")
+            else:
+                print(f"Warning: No images could be loaded, falling back to dynamic generation")
+                mode = "dynamic"
+        else:
+            print(f"Warning: No images found in {image_path}, falling back to dynamic generation")
+    
+    elif p.exists():
+        # Single static image
+        try:
+            with open(image_path, 'rb') as f:
+                images = [f.read()]
+            mode = "static"
+            print(f"Using static image: {image_path}")
+        except Exception as e:
+            print(f"Warning: Failed to load image {image_path}: {e}")
+            mode = "dynamic"
+    else:
+        print(f"Warning: Path {image_path} not found, falling back to dynamic generation")
+    
+    return images, mode
+
+
+async def image_server(websocket, path, preloaded_images=None, mode="dynamic", fps=10, output_format='JPEG'):
     """Handle WebSocket connection and send images"""
     client_addr = websocket.remote_address
     print(f"Client connected from {client_addr}")
     
     frame_num = 0
     delay = 1.0 / fps
+    images = preloaded_images or []
     
     try:
-        # Load images based on configuration
-        images = []
-        mode = "dynamic"
-        
-        if image_path:
-            p = Path(image_path)
-            if p.is_dir():
-                # Load all images from directory
-                extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp', '*.tif', '*.tiff']
-                unique_images = set()
-                for ext in extensions:
-                    unique_images.update(p.glob(ext))
-                    unique_images.update(p.glob(ext.upper()))
-                
-                images = sorted(list(unique_images))
-                
-                if images:
-                    mode = "directory"
-                    print(f"Found {len(images)} images in {image_path}")
-                else:
-                    print(f"Warning: No images found in {image_path}, falling back to dynamic generation")
-            
-            elif p.exists():
-                # Single static image
-                with open(image_path, 'rb') as f:
-                    images = [f.read()]
-                mode = "static"
-                print(f"Using static image: {image_path}")
-            else:
-                print(f"Warning: Path {image_path} not found, falling back to dynamic generation")
-        else:
-            print(f"Generating dynamic test images ({output_format})")
+        if mode == "directory" and images:
+            # Log image info on first connection
+            if frame_num == 0:
+                print(f"  Sending images of size ~{len(images[0]):,} bytes each")
         
         while True:
-            if mode == "static":
-                image_data = images[0]
-            elif mode == "directory":
-                # Cycle through images in directory
-                current_image_path = images[frame_num % len(images)]
-                with open(current_image_path, 'rb') as f:
-                    image_data = f.read()
-            else:
-                image_data = await create_test_image(frame_num=frame_num, output_format=output_format)
+            try:
+                if mode == "static":
+                    image_data = images[0]
+                elif mode == "directory":
+                    # Cycle through pre-loaded images in memory (no disk I/O)
+                    image_data = images[frame_num % len(images)]
+                else:
+                    image_data = await create_test_image(frame_num=frame_num, output_format=output_format)
+                
+                # Send with error handling - if send fails, break the loop
+                try:
+                    await websocket.send(image_data)
+                except websockets.exceptions.ConnectionClosed:
+                    # Connection closed during send - break normally
+                    break
+                except Exception as send_error:
+                    print(f"Error sending frame to {client_addr}: {send_error}")
+                    break
+                
+                frame_num += 1
+                
+                if frame_num % 100 == 0:
+                    print(f"Sent {frame_num} frames to {client_addr}")
+                
+                await asyncio.sleep(delay)
+                
+            except websockets.exceptions.ConnectionClosed:
+                # Connection closed during loop - break normally
+                break
+            except Exception as e:
+                print(f"Error in send loop for {client_addr}: {e}")
+                break
             
-            await websocket.send(image_data)
-            frame_num += 1
-            
-            if frame_num % 100 == 0:
-                print(f"Sent {frame_num} frames to {client_addr}")
-            
-            await asyncio.sleep(delay)
-            
-    except websockets.exceptions.ConnectionClosed:
-        print(f"Client {client_addr} disconnected (sent {frame_num} frames)")
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"Client {client_addr} disconnected (sent {frame_num} frames) - Code: {e.code}, Reason: {e.reason}")
+    except websockets.exceptions.ConnectionClosedError as e:
+        print(f"Client {client_addr} connection error (sent {frame_num} frames) - {e}")
     except Exception as e:
-        print(f"Error: {e}")
+        import traceback
+        print(f"Error in image_server for {client_addr}: {e}")
+        traceback.print_exc()
+    finally:
+        if frame_num > 0:
+            print(f"Client {client_addr} finished (sent {frame_num} frames)")
 
 
 async def main():
@@ -233,8 +325,8 @@ async def main():
     parser.add_argument('--host', type=str, default='localhost', help='WebSocket server host (default: localhost)')
     parser.add_argument('--image', type=str, help='Path to image file to send (JPEG/PNG)')
     parser.add_argument('--fps', type=float, default=10, help='Frames per second (default: 10)')
-    parser.add_argument('--format', type=str, default='JPEG', choices=['JPEG', 'PNG', 'BMP_RAW', 'LZ4_RAW'], 
-                        help='Output format for dynamic images (default: JPEG). Use BMP_RAW for uncompressed, LZ4_RAW for compressed raw.')
+    parser.add_argument('--format', type=str, default='JPEG', choices=['JPEG', 'PNG', 'BMP_RAW', 'LZ4_RAW', 'RAW_8BIT'], 
+                        help='Output format for dynamic images (default: JPEG). Use BMP_RAW for uncompressed, LZ4_RAW for compressed raw, RAW_8BIT for raw 8-bit grayscale (250x250).')
     
     args = parser.parse_args()
     
@@ -245,12 +337,19 @@ async def main():
         print(f"Image: {args.image}")
     else:
         print("Mode: Dynamic test image generation")
+    
+    # Load images once at startup (shared across all connections)
+    print("\nPre-loading images...")
+    preloaded_images, mode = load_images(args.image)
+    
     print("\nConnect your Grafana panel to: ws://localhost:8765/")
     print("Press Ctrl+C to stop\n")
     
     async def handler(websocket):
         # In newer websockets versions, path is available as websocket.path
-        await image_server(websocket, getattr(websocket, 'path', '/'), args.image, args.fps, args.format)
+        await image_server(websocket, getattr(websocket, 'path', '/'), 
+                          preloaded_images=preloaded_images, mode=mode, 
+                          fps=args.fps, output_format=args.format)
     
     async with websockets.serve(
         handler,
