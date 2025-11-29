@@ -24,23 +24,6 @@ export const plugin = new PanelPlugin<LiveImagePanelOptions>(LiveImagePanel).set
       },
     })
     .addSelect({
-      path: 'imageFormat',
-      name: 'Image Format',
-      description: 'Image format detection mode. Auto will try to detect from data.',
-      defaultValue: 'auto',
-      settings: {
-        options: [
-          { value: 'auto', label: 'Auto-detect' },
-          { value: 'image/jpeg', label: 'JPEG' },
-          { value: 'image/png', label: 'PNG' },
-          { value: 'image/webp', label: 'WebP' },
-          { value: 'image/tiff', label: 'TIFF (via conversion)' },
-          { value: 'image/bmp', label: 'Raw (BMP)' },
-          { value: 'image/lz4', label: 'Raw (LZ4)' },
-        ],
-      },
-    })
-    .addSelect({
       path: 'objectFit',
       name: 'Image Fit',
       description: 'How the image should be resized to fit the container',

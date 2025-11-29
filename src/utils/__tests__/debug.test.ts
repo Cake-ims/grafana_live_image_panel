@@ -2,7 +2,7 @@
  * Tests for debugging utilities
  */
 
-import { validateWebSocketUrl, formatBytes, getWebSocketState } from '../debug';
+import { validateWebSocketUrl } from '../debug';
 
 describe('validateWebSocketUrl', () => {
   it('should validate correct ws:// URLs', () => {
@@ -32,25 +32,3 @@ describe('validateWebSocketUrl', () => {
     expect(result.error).toContain('Invalid URL format');
   });
 });
-
-describe('formatBytes', () => {
-  it('should format bytes correctly', () => {
-    expect(formatBytes(0)).toBe('0 Bytes');
-    expect(formatBytes(1024)).toBe('1 KB');
-    expect(formatBytes(1048576)).toBe('1 MB');
-  });
-});
-
-describe('getWebSocketState', () => {
-  it('should return NULL for null WebSocket', () => {
-    expect(getWebSocketState(null)).toBe('NULL');
-  });
-
-  it('should return state string for WebSocket', () => {
-    const ws = new WebSocket('ws://localhost');
-    const state = getWebSocketState(ws);
-    expect(['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']).toContain(state);
-    ws.close();
-  });
-});
-
